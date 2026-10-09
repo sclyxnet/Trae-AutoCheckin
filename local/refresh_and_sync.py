@@ -31,9 +31,16 @@ os.environ["HTTP_PROXY"]  = "socks5h://127.0.0.1:10808"
 
 # ── 日志 Tee（控制台 + 文件，保留最近 30 份）──────────
 LOG_DIR.mkdir(parents=True, exist_ok=True)
+_TODAY = datetime.now().strftime("%Y%m%d")
+_LOG_PATH = LOG_DIR / ("sync_%s.log" % _TODAY)
+# ── 幂等守卫: 当天已成功同步过则直接退出（供 ONLOGON 补偿任务复用）──
+if _LOG_PATH.exists() and "[7] 全部完成" in _LOG_PATH.read_text(encoding="utf-8", errors="replace"):
+    print("%s  [SKIP] 今天(%s)已成功同步过, 补偿任务直接退出" % (
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _TODAY))
+    sys.exit(0)
 for old in sorted(LOG_DIR.glob("sync_*.log"))[:-30]:
     old.unlink(missing_ok=True)
-_LOG_F = open(LOG_DIR / ("sync_%s.log" % datetime.now().strftime("%Y%m%d")), "a", encoding="utf-8")
+_LOG_F = open(_LOG_PATH, "a", encoding="utf-8")
 class _Tee:
     def write(self, s):
         try: sys.__stdout__.write(s)
@@ -146,7 +153,29 @@ def main():
     put("TRAE_MACHINE_ID", machineId)
     put("TRAE_DEVICE_KEY_PEM", priv.replace("\n", "\\n"))
     put("TRAE_DEVICE_PUB_PEM", pub.replace("\n", "\\n"))
-    log("[5] 全部完成：GitHub Secret 已同步，等待 Actions 两班(00:23/08:23)签到")
+    log("[5] 5 个 Secret 已同步, dispatch 触发一次签到...")
+    api("/repos/%s/actions/workflows/trae-auto-checkin.yml/dispatches" % REPO,
+        {"ref": "main"}, "POST")
+    rid = None
+    for _ in range(20):          # 有界: 最多 ~100s 找到本次 run
+        runs = api("/repos/%s/actions/runs?per_page=3" % REPO)["workflow_runs"]
+        for r in runs:
+            if r["event"] == "workflow_dispatch" and r["status"] in ("queued", "in_progress"):
+                rid = r["id"]; break
+        if rid: break
+        time.sleep(5)
+    if not rid:
+        log("[5][!] 未捕获到 dispatch run（可能排队中），GitHub 侧稍后自会执行")
+    else:
+        log("[6] run id=%s, 等待完成(最多 ~240s)..." % rid)
+        concl = None
+        for _ in range(24):
+            r = api("/repos/%s/actions/runs/%s" % (REPO, rid))
+            if r["status"] == "completed":
+                concl = r["conclusion"]; break
+            time.sleep(10)
+        log("[6] 签到 run 结论: %s" % (concl or "timeout(仍在运行, 推送结果以 PushPlus 为准)"))
+    log("[7] 全部完成：Secret 已同步 + 已触发签到，结果看 PushPlus 推送")
 
 if __name__ == "__main__":
     try:
