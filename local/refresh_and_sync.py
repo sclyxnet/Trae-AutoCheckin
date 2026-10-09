@@ -34,7 +34,9 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 _TODAY = datetime.now().strftime("%Y%m%d")
 _LOG_PATH = LOG_DIR / ("sync_%s.log" % _TODAY)
 # ── 幂等守卫: 当天已成功同步过则直接退出（供 ONLOGON 补偿任务复用）──
-if _LOG_PATH.exists() and "[7] 全部完成" in _LOG_PATH.read_text(encoding="utf-8", errors="replace"):
+# TRAE_FORCE=1 可跳过守卫(调试/演示用)
+if os.environ.get("TRAE_FORCE") != "1" and \
+   _LOG_PATH.exists() and "[7] 全部完成" in _LOG_PATH.read_text(encoding="utf-8", errors="replace"):
     print("%s  [SKIP] 今天(%s)已成功同步过, 补偿任务直接退出" % (
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _TODAY))
     sys.exit(0)
@@ -54,9 +56,61 @@ def log(msg):
     line = "%s  %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
     print(line)
 
+def _launch_and_tray():
+    """explorer 代理后台拉起 Trae, 窗口出现后发 WM_CLOSE 缩系统托盘(前台无感知)。
+    实测: Popen/Start-Process 直接 CreateProcess 会秒退, 必须 explorer 启动。"""
+    try:
+        subprocess.Popen(["explorer.exe", TRAE_EXE])
+        log("[1] Trae 未运行, 已 explorer 代理后台拉起")
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        WM_CLOSE = 0x0010
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        closed = []
+        for _ in range(18):                       # 18 x 10s = 180s, Trae 启动慢
+            time.sleep(10)
+            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                                 capture_output=True, timeout=30).stdout.decode("gbk", "replace")
+            target = {int(l.split('","')[1]) for l in out.splitlines()
+                      if len(l.split('","')) >= 2 and l.split('","')[0].strip('"').lower() == "trae solo cn.exe"}
+            if not target:
+                continue
+            def _cb(hwnd, _):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value in target and user32.IsWindowVisible(hwnd):
+                    t = ctypes.create_unicode_buffer(256)
+                    user32.GetWindowTextW(hwnd, t, 256)
+                    if t.value:                    # 有标题的可见主窗口
+                        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                        closed.append(t.value)
+                        return False
+                return True
+            user32.EnumWindows(WNDENUMPROC(_cb), 0)
+            if closed:
+                break
+        log("[1] 主窗口%s" % ("已发 WM_CLOSE -> 缩系统托盘(标题:%s)" % closed[0] if closed
+                              else "未出现/已在托盘, 前台无感知"))
+    except Exception as e:
+        log("[1][X] 拉起 Trae 失败: %r（继续用现有存储令牌尝试同步）" % e)
+
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    # 1) 拉起 Trae（若未运行）
+    # 0) storage.json 新鲜度检查: 进程即使驻留托盘, 也可能几天没真正刷过会话。
+    #    mtime 不是今天 -> 杀掉进程强制重拉(重拉后会刷新)。
+    stale = False
+    try:
+        stale = datetime.fromtimestamp(STORAGE.stat().st_mtime).date() != datetime.now().date()
+    except OSError:
+        stale = True
+    def kill_trae():
+        r = subprocess.run(["taskkill", "/F", "/IM", "TRAE SOLO CN.exe", "/T"],
+                           capture_output=True, timeout=60)
+        log("[0] 已杀掉旧 TRAE 进程(storage.json 停留在 %s), 强制重拉刷新会话" %
+            datetime.fromtimestamp(STORAGE.stat().st_mtime).strftime("%Y-%m-%d %H:%M"))
+        time.sleep(3)
+    # 1) 拉起 Trae（若未运行 或 数据过期）
     def trae_running():
         try:
             out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq TRAE SOLO CN.exe"],
@@ -64,51 +118,14 @@ def main():
             return "trae solo cn.exe" in out
         except Exception:
             return False
-    started = False
-    if not trae_running():
-        try:
-            # 仅在 Trae 未运行时后台拉起。
-            # 实测: Popen/Start-Process 直接 CreateProcess 会让 Trae 秒退, 必须 explorer 代理启动(等同双击)。
-            # 简化: 拉起 -> 等 40s -> 一轮枚举窗口最小化(失败也无妨, 不影响同步)。
-            subprocess.Popen(["explorer.exe", TRAE_EXE])
-            log("[1] Trae 未运行, 已 explorer 代理后台拉起")
-            started = True
-            # 等主窗口出现后发 WM_CLOSE(=点X): Trae 缩到系统托盘, 进程驻留, 前台无感知。
-            # Trae 启动慢, 多轮巡查最多 ~3 分钟。
-            import ctypes
-            from ctypes import wintypes
-            user32 = ctypes.windll.user32
-            WM_CLOSE = 0x0010
-            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-            closed = []
-            for _ in range(18):                       # 18 x 10s = 180s
-                time.sleep(10)
-                out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
-                                     capture_output=True, timeout=30).stdout.decode("gbk", "replace")
-                target = {int(l.split('","')[1]) for l in out.splitlines()
-                          if len(l.split('","')) >= 2 and l.split('","')[0].strip('"').lower() == "trae solo cn.exe"}
-                if not target:
-                    continue
-                def _cb(hwnd, _):
-                    pid = wintypes.DWORD()
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                    if pid.value in target and user32.IsWindowVisible(hwnd):
-                        t = ctypes.create_unicode_buffer(256)
-                        user32.GetWindowTextW(hwnd, t, 256)
-                        if t.value:                    # 有标题的可见主窗口
-                            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-                            closed.append(t.value)
-                            return False
-                    return True
-                user32.EnumWindows(WNDENUMPROC(_cb), 0)
-                if closed:
-                    break
-            log("[1] 主窗口%s" % ("已发 WM_CLOSE -> 缩系统托盘(标题:%s)" % closed[0] if closed
-                                  else "未出现/已在托盘, 前台无感知"))
-        except Exception as e:
-            log("[1][X] 拉起 Trae 失败: %r（继续用现有存储令牌尝试同步）" % e)
+    running = trae_running()
+    if running and stale:
+        kill_trae()
+        running = False
+    if not running:
+        _launch_and_tray()
     else:
-        log("[1] Trae 已在运行，跳过拉起")
+        log("[1] Trae 已在运行且 storage.json 是今天的, 跳过拉起")
     # 2) 等客户端刷新会话
     log("[2] 等待 %ds 让 Trae 刷新会话..." % WAIT_S)
     time.sleep(WAIT_S)
