@@ -35,3 +35,6 @@ local.env
 trae-*.json
 trae_accounts.out
 trae_keys.out
+
+# 本地保活任务日志(绝不入库)
+local/logs/
