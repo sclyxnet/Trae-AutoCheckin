@@ -1356,9 +1356,10 @@ def _build_account_message(r):
                 'workflow_dispatch': '来源: GitHub dispatch（本地保活任务触发）'}.get(src)
     if src_line is None and src:
         src_line = '来源: GitHub %s' % src
-    body = exp_block + '\n消息: ' + msg
+    body = ''
     if src_line:
-        body += '\n' + src_line
+        body += src_line + '\n'
+    body += exp_block + '\n消息: ' + msg
     return head, body
 
 
