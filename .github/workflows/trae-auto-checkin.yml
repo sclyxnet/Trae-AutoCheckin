@@ -18,7 +18,7 @@
 #        TRAE_ACCOUNTS / TRAE_DEVICE_KEY_PEM / TRAE_DEVICE_PUB_PEM
 #        TRAE_DEVICE_ID / TRAE_MACHINE_ID
 #      (可选) QYWX_TOKEN = 企业微信机器人 key；PLUSPLUS_TOKEN = PushPlus token（与 WorkBuddy 签到同款推送）。
-#   4) 本工作流每天北京时间 00:23 主签 + 01:00/02:00 补签；也可手动 Run workflow。
+#   4) 本工作流每天北京时间 00:23 首试 + 10:23 兜底（两班制，0点高峰延伸 10h）；也可手动 Run workflow。
 #
 # 关键: refreshToken 是轮换链，必须跨运行持久化，否则下次跑会用已失效的旧
 #       refreshToken -> 20101。本工作流用 actions/cache 持久化 .trae_token_cache.json。
@@ -29,11 +29,13 @@ name: Trae 每日自动签到
 
 on:
   schedule:
-    # 北京时间 00:23（主窗，实测最容易签成）；UTC = 16:23
+    # 两班制（北京时间，均在同一天不跨天）：
+    #   00:23 首试——每日签到窗口刚开，若容量门未堵直接签成
+    #   10:23 兜底——高峰期(0点)易堵 9074 容量门，错过则延伸 8~12h 再试，
+    #               10:23 = 0点后 10h，落在延伸窗口中点，容量最松
+    # UTC: 00:23+8 -> 16:23(前日UTC)；10:23+8 -> 02:23(当日UTC)
     - cron: '23 16 * * *'
-    # 北京时间 01:00 / 02:00 补签（应对 9074 参与人数容量门）
-    - cron: '0 17 * * *'
-    - cron: '0 18 * * *'
+    - cron: '23 2 * * *'
   workflow_dispatch: {}   # 允许在 Actions 页面手动触发
 
 permissions:
