@@ -67,6 +67,7 @@ jobs:
           TRAE_TOKEN_CACHE: .trae_token_cache.json
           QYWX_TOKEN: ${{ secrets.QYWX_TOKEN }}
           PLUSPLUS_TOKEN: ${{ secrets.PLUSPLUS_TOKEN }}
+          TRAE_SOURCE: ${{ github.event_name }}   # cron=定时班 / workflow_dispatch=本地触发
           TRAE_PEAK_HOURS: '0'
           TRAE_COOLDOWN_MIN: '55'
           TRAE_PEAK_COOLDOWN_MIN: '12'

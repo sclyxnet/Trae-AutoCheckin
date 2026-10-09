@@ -1350,7 +1350,16 @@ def _build_account_message(r):
     else:
         msg = r.get('detail') or r.get('status') or '未知'
 
-    return head, exp_block + '\n消息: ' + msg
+    # 触发来源: cron=定时班 / workflow_dispatch=本地保活任务 dis 触发
+    src = (os.environ.get('TRAE_SOURCE') or '').strip()
+    src_line = {'cron': '来源: GitHub cron（定时班）',
+                'workflow_dispatch': '来源: GitHub dispatch（本地保活任务触发）'}.get(src)
+    if src_line is None and src:
+        src_line = '来源: GitHub %s' % src
+    body = exp_block + '\n消息: ' + msg
+    if src_line:
+        body += '\n' + src_line
+    return head, body
 
 
 # ══════════════════ 主流程 ══════════════════
