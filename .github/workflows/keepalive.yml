@@ -1,0 +1,72 @@
+name: Keepalive
+
+# 防止 GitHub 因「60 天无仓库活动」自动禁用本仓库的定时任务（schedule 事件）。
+# 镜像自 WorkBuddy 签到仓库的 keepalive 设计，用于 sclyxnet/Trae-AutoCheckin。
+#
+# 背景事实（决定本工作流怎么设计）：
+#   1. GitHub 判定「仓库活动」以**提交/push** 为准——工作流自身运行、Issue/评论、PR 都不计数。
+#      自动禁用提示原文："...more than 60 days since the last commit"。
+#   2. 因此旧版「curl 一次 Actions API 读取运行列表」是纯只读操作、不产生提交，
+#      对防止自动禁用完全无效（这是旧版的核心 bug）。
+#   3. 另有主流方案：调用 API 预启用工作流（liskin/gh-workflow-keepalive 的做法），
+#      不产生任何提交，同样可防止被自动禁用。
+#
+# 本工作流采用双保险：
+#   A. 每周推送一个空提交 —— 直接刷新「最近提交时间」，硬保障；
+#      --allow-empty 不产生文件变更，不会与本地改动冲突；[skip ci] 避免触发 push 型工作流。
+#   B. 调用 Actions API 预启用 trae-auto-checkin.yml / keepalive.yml —— 无提交噪音的补充保障。
+# 频率取每周：即便偶发丢跑，间隔仍远小于 60 天（旧版每月一次，一旦丢跑间隔≈62 天反而超限）。
+
+on:
+  schedule:
+    # 每周一北京时间 08:00 = UTC 00:00（GitHub Actions 的 cron 使用 UTC）
+    - cron: "0 0 * * 1"
+  # 允许在 Actions 页面手动触发，便于调试
+  workflow_dispatch:
+
+# 避免两次保活并发推送冲突
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write   # A. 推送空提交必需
+      actions: write    # B. 调用 enable API 必需
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: A. 推送空提交，刷新最近提交时间
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive ping $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "[ok] keepalive commit pushed"
+
+      # if: always() —— 关键：上面推送失败（如分支保护/权限不足）时，兜底步骤仍要执行，
+      # 否则「唯一有效的保活手段」会因提交失败而整体跳过。
+      - name: B. 通过 API 预启用定时任务（免提交的补充保障）
+        if: always()
+        run: |
+          set -e
+          for wf in trae-auto-checkin.yml keepalive.yml; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$wf/enable")
+            echo "  $wf -> enable HTTP $code"
+            [ "$code" = "204" ] || echo "  [warn] $wf enable 返回 $code（检查 actions: write 权限）"
+          done
+
+      - name: C. 报告最近提交时间
+        if: always()
+        run: |
+          echo "分支: ${GITHUB_REF_NAME}"
+          echo "最近一次提交: $(git log -1 --format='%cd' --date=iso)"

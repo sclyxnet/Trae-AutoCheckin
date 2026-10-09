@@ -1158,6 +1158,9 @@ def checkin_account(acc, cache):
             result['detail'] = msg
             return result
 
+    if acc.get('accessToken'):
+        result['token_exp_ms'] = _jwt_exp(acc['accessToken']) * 1000
+
     acc['deviceId'] = device_id_for(acc, acc.get('deviceId', ''))
     print('📱 [设备号] %s: %s' % (name, acc['deviceId']))
     log_head('📡 %s 签到状态查询' % name)
@@ -1173,14 +1176,19 @@ def checkin_account(acc, cache):
             print('❌ [刷新] 失败: %s' % msg)
     print('📊 [状态] 今日已签: %s   积分: %s   开放: %s' % (checked_in, credits, enable))
 
+    streak, total_days = _extract_streak(raw)
+    if streak is not None:
+        result['streak'] = streak
+    if total_days is not None:
+        result['total_days'] = total_days
+
     if checked_in:
         pts = credits_summary(acc)
         result['icon'] = '☑️'
         result['status'] = '已签到'
         result['credits'] = pts if pts is not None else credits
-        result['detail'] = ('今日已签，积分余额 %s' % _fmt(result['credits'])) if pts is not None \
-            else '今日已签，积分 %s' % credits
-        print('☑️  [结果] 今日已签到')
+        result['detail'] = '今天已签到，请明天再来（重复签到）'
+        print('☑️  [结果] 今日已签到（重复签到）')
         return result
     # 状态查询拿到鉴权失败（刷新后仍 1001）→ 硬失败，绝不浪费 claim 请求
     if code in AUTH_FAIL_CODES:
@@ -1217,6 +1225,7 @@ def checkin_account(acc, cache):
     if ok:
         pts = credits_summary(acc)
         result['status'] = '签到成功'
+        result['gained'] = gained
         gain = ('，本次 +%s 积分' % _fmt(gained)) if gained else ''
         if pts is not None:
             result['credits'] = pts
@@ -1230,8 +1239,8 @@ def checkin_account(acc, cache):
         result['icon'] = '☑️'
         result['status'] = '已签到'
         result['credits'] = credits
-        result['detail'] = '今日已签到(9095)'
-        print('☑️  [结果] 今日已签到')
+        result['detail'] = '今天已签到，请明天再来（重复签到）'
+        print('☑️  [结果] 今日已签到（重复签到）')
     elif code == RATE_CODE:
         result['icon'] = '⏳'
         result['status'] = '待重试'
@@ -1250,6 +1259,98 @@ def _fmt(v):
         return '{:,.2f}'.format(float(v))
     except Exception:
         return str(v)
+
+
+def _extract_streak(raw):
+    """从 checkin_credits/status 原始响应里挖连续/累计签到天数。
+
+    Trae 的状态接口字段名随版本变化，这里做模糊匹配
+    （streak / continuous / consecutive / sign_days / check_in_days / total+check），
+    找不到返回 (None, None)，由调用方决定是否展示（对齐 WorkBuddy：无则不显示）。"""
+    try:
+        d = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None, None
+    cont = total = None
+
+    def walk(o):
+        nonlocal cont, total
+        if isinstance(o, dict):
+            for k, v in o.items():
+                kl = str(k).lower()
+                if cont is None and isinstance(v, int) and not isinstance(v, bool) and (
+                        'streak' in kl or 'continuous' in kl or 'consecutive' in kl
+                        or kl.endswith('sign_days') or 'check_in_days' in kl or kl == 'signcount'):
+                    cont = v
+                if total is None and isinstance(v, int) and not isinstance(v, bool) and (
+                        'total' in kl and ('check' in kl or 'sign' in kl or 'day' in kl)):
+                    total = v
+                walk(v)
+        elif isinstance(o, list):
+            for it in o:
+                walk(it)
+    walk(d)
+    return cont, total
+
+
+def _build_account_message(r):
+    """构造单账号推送（标题+正文），对齐 WorkBuddy 模板：
+
+    Trae(账号)签到成功✅
+    当前: 2026-10-09 17:30 (北京时间)
+    到期: 2026-11-08 09:00 (北京时间)
+    剩余: 30 天
+    消息: 本次 +5 积分，当前余额 123.00，连续签到 12 天
+
+    - 成功: 本次积分 + 余额 + 连续签到天数（参考 WorkBuddy「积分 X / 连续签到 N 天」）
+    - 已签到(含 9095): 今天已签到，请明天再来（重复签到）
+    - 失败: 直接给原因
+    - token 寿命块：用 accessToken(JWT exp) 换算北京时间，每次都带
+      （参考 WorkBuddy 的 当前/到期/剩余 信息块）
+    """
+    name = r.get('name') or r.get('uid') or '(未知)'
+    status = r.get('status')
+    if status == '签到成功':
+        head = 'Trae(%s)签到成功✅' % name
+    elif status == '已签到':
+        head = 'Trae(%s)今日已签到' % name
+    elif status == '待重试':
+        head = 'Trae(%s)待重试⏳' % name
+    elif status in DEAD:
+        head = 'Trae(%s)需处理⚠️' % name
+    else:
+        head = 'Trae(%s)签到失败❌' % name
+
+    exp_ms = r.get('token_exp_ms')
+    if exp_ms:
+        exp_dt = time.gmtime(exp_ms / 1000 + 8 * 3600)
+        exp_str = time.strftime('%Y-%m-%d %H:%M', exp_dt)
+        now_bj = bj()
+        days_left = (exp_ms / 1000 - time.time()) / 86400
+        left = '已过期' if days_left <= 0 else '%d 天' % int(days_left)
+    else:
+        now_bj = bj()
+        exp_str = '未知'
+        left = '未知'
+    exp_block = '当前: %s (北京时间)\n到期: %s (北京时间)\n剩余: %s' % (now_bj, exp_str, left)
+
+    if status == '已签到':
+        msg = '今天已签到，请明天再来（重复签到）'
+    elif status == '签到成功':
+        parts = []
+        if r.get('gained') is not None:
+            parts.append('本次 +%s 积分' % _fmt(r['gained']))
+        if r.get('credits') not in (None, '-', ''):
+            parts.append('当前余额 %s' % _fmt(r['credits']))
+        if r.get('streak') is not None:
+            parts.append('连续签到 %d 天' % r['streak'])
+        if r.get('total_days') is not None:
+            parts.append('累计 %d 天' % r['total_days'])
+        msg = '，'.join(parts) if parts else '签到成功'
+    else:
+        msg = r.get('detail') or r.get('status') or '未知'
+
+    return head, exp_block + '\n消息: ' + msg
 
 
 # ══════════════════ 主流程 ══════════════════
@@ -1275,6 +1376,8 @@ def main():
                             'uid': acc.get('uid', '-'), 'icon': '☑️', 'status': '已签到',
                             'credits': rec.get('credits', '-'),
                             'detail': '今日已完成（%s），跳过请求' % rec.get('at', '-')})
+            if acc.get('accessToken'):
+                results[-1]['token_exp_ms'] = _jwt_exp(acc['accessToken']) * 1000
             print('☑️  [%s] 今日已签到，跳过' % (acc.get('_name') or acc.get('name') or key))
         else:
             left = cooldown_left(key)
@@ -1343,7 +1446,15 @@ def main():
            '✅ 成功 %d  ☑️ 已签 %d  ⏳ 待重试 %d  ❌ 失败 %d' % (ok_n, already_n, soft_n, fail_n + dead_n)]
     for r in results:
         out.append('%s %s(%s): %s | %s' % (r['icon'], r['name'], r['uid'], r['status'], r['detail']))
-    push('🤖 Trae SOLO 多账号签到', '\n'.join(out))
+
+    # 推送（对齐 WorkBuddy 风格）：
+    #   • PushPlus（1:1）：逐账号推送，每条带 积分/连续签到天数/重复签到提示 + token 寿命块（当前/到期/剩余）
+    #   • 企业微信群机器人（群）：发一条汇总，避免刷屏
+    if PLUSPLUS_TOKEN:
+        for r in results:
+            title, body = _build_account_message(r)
+            notify_pushplus(title, body)
+    notify('\n'.join(out), '🤖 Trae SOLO 多账号签到')
 
 
 if __name__ == '__main__':

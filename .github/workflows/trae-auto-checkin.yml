@@ -1,0 +1,71 @@
+# =============================================================
+# Trae 每日自动签到 + 自动续期 token (GitHub Actions)
+# 参考: https://github.com/L0NE-6/Trae-AutoCheckin
+# -------------------------------------------------------------
+# 为什么用这个仓库而不是旧 skill:
+#   旧 totorosir-traework-checkin 依赖 GetUserToken 返回的短效 JWT，
+#   运行到你那步已过期 -> 1001 鉴权失败。本仓库用「持久 refreshToken
+#   + 设备 ECDSA 设备证明(P-256)」现场换 accessToken，refreshToken 是
+#   轮换链，每次续期回写最新值，长期不失效（缺设备证明会报 20405）。
+#
+# 部署步骤:
+#   1) 在你自己的仓库(建议 fork L0NE-6/Trae-AutoCheckin 到 sclyxnet 或个人账号)的
+#      .github/workflows/ 下放本文件。
+#   2) 本机装好并登录 Trae 客户端后，跑:
+#        python trae_get_token.py --accounts      # 得到 TRAE_ACCOUNTS 单行 JSON
+#        python trae_get_token.py --export-keys    # 得到 4 个设备密钥变量
+#   3) 把下面 6 个值填进仓库 Settings -> Secrets and variables -> Actions -> New repository secret:
+#        TRAE_ACCOUNTS / TRAE_DEVICE_KEY_PEM / TRAE_DEVICE_PUB_PEM
+#        TRAE_DEVICE_ID / TRAE_MACHINE_ID
+#      (可选) QYWX_TOKEN = 企业微信机器人 key；PLUSPLUS_TOKEN = PushPlus token（与 WorkBuddy 签到同款推送）。
+#   4) 本工作流每天北京时间 00:23 主签 + 01:00/02:00 补签；也可手动 Run workflow。
+#
+# 关键: refreshToken 是轮换链，必须跨运行持久化，否则下次跑会用已失效的旧
+#       refreshToken -> 20101。本工作流用 actions/cache 持久化 .trae_token_cache.json。
+#       若缓存被清空，需用 --accounts 重新导出 TRAE_ACCOUNTS 再填一次 secret。
+# =============================================================
+
+name: Trae 每日自动签到
+
+on:
+  schedule:
+    # 北京时间 00:23（主窗，实测最容易签成）；UTC = 16:23
+    - cron: '23 16 * * *'
+    # 北京时间 01:00 / 02:00 补签（应对 9074 参与人数容量门）
+    - cron: '0 17 * * *'
+    - cron: '0 18 * * *'
+  workflow_dispatch: {}   # 允许在 Actions 页面手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout（承载本 workflow 的仓库）
+        uses: actions/checkout@v4
+
+      - name: 恢复 token 缓存（refreshToken 轮换链必须跨运行持久化）
+        uses: actions/cache@v4
+        with:
+          path: .trae_token_cache.json
+          key: trae-token-${{ github.run_id }}
+          restore-keys: |
+            trae-token-
+
+      - name: 执行签到 & 自动续期 token
+        env:
+          TRAE_ACCOUNTS: ${{ secrets.TRAE_ACCOUNTS }}
+          TRAE_DEVICE_KEY_PEM: ${{ secrets.TRAE_DEVICE_KEY_PEM }}
+          TRAE_DEVICE_PUB_PEM: ${{ secrets.TRAE_DEVICE_PUB_PEM }}
+          TRAE_DEVICE_ID: ${{ secrets.TRAE_DEVICE_ID }}
+          TRAE_MACHINE_ID: ${{ secrets.TRAE_MACHINE_ID }}
+          TRAE_TOKEN_CACHE: .trae_token_cache.json
+          QYWX_TOKEN: ${{ secrets.QYWX_TOKEN }}
+          PLUSPLUS_TOKEN: ${{ secrets.PLUSPLUS_TOKEN }}
+          TRAE_PEAK_HOURS: '0'
+          TRAE_COOLDOWN_MIN: '55'
+          TRAE_PEAK_COOLDOWN_MIN: '12'
+        run: python3 trae_checkin.py
