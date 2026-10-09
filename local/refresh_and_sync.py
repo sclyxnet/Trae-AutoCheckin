@@ -67,22 +67,46 @@ def main():
     started = False
     if not trae_running():
         try:
-            # 仅在 Trae 未运行时后台拉起，最小化、前台无感知
-            subprocess.Popen([TRAE_EXE, "--start-minimized"], cwd=str(Path(TRAE_EXE).parent),
-                             creationflags=0x00000008 | 0x00000004,  # DETACHED_PROCESS | CREATE_NO_WINDOW
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # 仅在 Trae 未运行时后台拉起。
+            # 实测: Popen/Start-Process 直接 CreateProcess 会让 Trae 秒退, 必须 explorer 代理启动(等同双击)。
+            # 简化: 拉起 -> 等 40s -> 一轮枚举窗口最小化(失败也无妨, 不影响同步)。
+            subprocess.Popen(["explorer.exe", TRAE_EXE])
+            log("[1] Trae 未运行, 已 explorer 代理后台拉起")
             started = True
-            log("[1] Trae 未运行，已后台最小化拉起: %s" % TRAE_EXE)
+            # 等主窗口出现后发 WM_CLOSE(=点X): Trae 缩到系统托盘, 进程驻留, 前台无感知。
+            # Trae 启动慢, 多轮巡查最多 ~3 分钟。
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            WM_CLOSE = 0x0010
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            closed = []
+            for _ in range(18):                       # 18 x 10s = 180s
+                time.sleep(10)
+                out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                                     capture_output=True, timeout=30).stdout.decode("gbk", "replace")
+                target = {int(l.split('","')[1]) for l in out.splitlines()
+                          if len(l.split('","')) >= 2 and l.split('","')[0].strip('"').lower() == "trae solo cn.exe"}
+                if not target:
+                    continue
+                def _cb(hwnd, _):
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if pid.value in target and user32.IsWindowVisible(hwnd):
+                        t = ctypes.create_unicode_buffer(256)
+                        user32.GetWindowTextW(hwnd, t, 256)
+                        if t.value:                    # 有标题的可见主窗口
+                            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                            closed.append(t.value)
+                            return False
+                    return True
+                user32.EnumWindows(WNDENUMPROC(_cb), 0)
+                if closed:
+                    break
+            log("[1] 主窗口%s" % ("已发 WM_CLOSE -> 缩系统托盘(标题:%s)" % closed[0] if closed
+                                  else "未出现/已在托盘, 前台无感知"))
         except Exception as e:
-            try:
-                # 兜底: PowerShell 最小化启动
-                subprocess.Popen(["powershell", "-NoProfile", "-WindowStyle", "Hidden",
-                                  "-Command", "Start-Process -FilePath '%s' -WindowStyle Minimized" % TRAE_EXE],
-                                 creationflags=0x08000000)
-                started = True
-                log("[1] PowerShell 兜底最小化拉起 Trae（Popen 失败: %r）" % e)
-            except Exception as e2:
-                log("[1][X] 拉起 Trae 失败: %r / %r（继续用现有存储令牌尝试同步）" % (e, e2))
+            log("[1][X] 拉起 Trae 失败: %r（继续用现有存储令牌尝试同步）" % e)
     else:
         log("[1] Trae 已在运行，跳过拉起")
     # 2) 等客户端刷新会话
