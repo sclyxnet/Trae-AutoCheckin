@@ -23,7 +23,7 @@ STORAGE    = Path(r"E:/devTools/AI/TraeCN/User/globalStorage/storage.json")
 LOCAL_ENV  = Path(r"E:/project/github/workbuddy-checkin/local.env")   # WB_GITHUB_TOKEN
 REPO       = "sclyxnet/Trae-AutoCheckin"
 GET_TOKEN  = Path(r"E:/project/github/Trae-AutoCheckin/trae_get_token.py")
-LOG_DIR    = Path(r"E:/project/github/Trae-AutoCheckin/local/logs")
+LOG_DIR    = Path(r"Z:/tmp/trae-autocheckin/logs")
 WAIT_S     = int(os.environ.get("TRAE_WAIT_SECONDS", "100"))
 # 代理铁律: GitHub 走 socks5
 os.environ["HTTPS_PROXY"] = "socks5h://127.0.0.1:10808"
