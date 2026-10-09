@@ -29,3 +29,9 @@ venv/
 *.log
 *.bak
 .DS_Store
+# Trae 签到: 敏感文件一律不入库
+*.env
+local.env
+trae-*.json
+trae_accounts.out
+trae_keys.out
