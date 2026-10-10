@@ -105,13 +105,14 @@ def main():
     #    - 剩余 >3 天: 进程在就直接同步, 不折腾 Trae
     stale = False
     life = None                       # None=探测失败
+    spec0 = importlib.util.spec_from_file_location("tg0", str(GET_TOKEN))
+    tg0 = importlib.util.module_from_spec(spec0); spec0.loader.exec_module(tg0)
     try:
-        spec0 = importlib.util.spec_from_file_location("tg0", str(GET_TOKEN))
-        tg0 = importlib.util.module_from_spec(spec0); spec0.loader.exec_module(tg0)
         ex0 = tg0.extract(str(STORAGE)) or {}
         at = ex0.get("accessToken") or ""
         p = at.split(".")[1]; p += "=" * (-len(p) % 4)
-        exp0 = int(json.loads(base64.urlsafe_b64decode(p)).get("exp", 0))
+        c0 = json.loads(base64.urlsafe_b64decode(p))
+        exp0 = int(c0.get("exp", 0))
         life = (exp0 - time.time()) / 86400
         if life <= 0:
             log("[0] accessToken %s(剩余 %.2f 天) -> 无条件强制重拉" %
@@ -121,6 +122,27 @@ def main():
         else:
             log("[0] accessToken 剩余 %.1f 天, 未到刷新窗口" % life)
         stale = life <= 3
+        # ── token 刷新观测(内嵌, 替代独立自动化): 指纹变化 = Trae 真刷新了 token ──
+        import hashlib
+        from datetime import timezone, timedelta
+        BJ = timezone(timedelta(hours=8))
+        fp = hashlib.sha256(at.encode()).hexdigest()[:8]
+        iat = int(c0.get("iat", 0))
+        wline = "%s  fp=%s  iat=%s  exp=%s  剩余=%.1f天" % (
+            datetime.now(BJ).strftime("%Y-%m-%d %H:%M"), fp,
+            datetime.fromtimestamp(iat, BJ).strftime("%m-%d %H:%M") if iat else "-",
+            datetime.fromtimestamp(exp0, BJ).strftime("%m-%d %H:%M"), life)
+        WATCH = Path(r"E:/project/github/Trae-AutoCheckin/local/token_watch.log")
+        prev_fp = None
+        if WATCH.exists():
+            for ln in reversed(WATCH.read_text(encoding="utf-8").splitlines()):
+                if "fp=" in ln:
+                    prev_fp = ln.split("fp=")[1].split()[0]; break
+        if prev_fp and prev_fp != fp:
+            wline += "  [CHANGED! 发生了token刷新, 上次指纹=%s]" % prev_fp
+            log("[0][观测] *** Trae 今天刷新了 token! 上次签发指纹=%s ***" % prev_fp)
+        with WATCH.open("a", encoding="utf-8") as f:
+            f.write(wline + "\n")
     except Exception as e:
         log("[0][!] token 寿命探测失败(%r), 退回 mtime 判定" % e)
         stale = False
