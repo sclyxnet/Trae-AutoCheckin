@@ -98,10 +98,13 @@ def _launch_and_tray():
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     # 0) token 寿命检查（实测: token 未到期时 Trae 重启只是恢复缓存会话, 不会换新 token;
-    #    只有快到期时重启才会触发真正重鉴权）。因此:
+    #    只有快到期时重启才会触发真正重鉴权）。三档决策:
+    #    - 剩余 <=0  (已到期/过期): 无条件强制重拉, 逼 Trae 重鉴权
+    #    - 剩余 <=3 天(快到期): 进程在也杀掉重拉 (3天为经验预估: 13天有效期x每3h一班,
+    #      3天窗口=~24次重拉机会, 兜底充足; 非官方值, Trae 源码未公开刷新阈值)
     #    - 剩余 >3 天: 进程在就直接同步, 不折腾 Trae
-    #    - 剩余 <=3 天: 强制杀掉重拉, 逼 Trae 走 refreshToken 换新链
     stale = False
+    life = None                       # None=探测失败
     try:
         spec0 = importlib.util.spec_from_file_location("tg0", str(GET_TOKEN))
         tg0 = importlib.util.module_from_spec(spec0); spec0.loader.exec_module(tg0)
@@ -109,22 +112,31 @@ def main():
         at = ex0.get("accessToken") or ""
         p = at.split(".")[1]; p += "=" * (-len(p) % 4)
         exp0 = int(json.loads(base64.urlsafe_b64decode(p)).get("exp", 0))
-        days = (exp0 - time.time()) / 86400
-        log("[0] 当前 accessToken 剩余 %.1f 天" % days)
-        stale = days <= 3
+        life = (exp0 - time.time()) / 86400
+        if life <= 0:
+            log("[0] accessToken %s(剩余 %.2f 天) -> 无条件强制重拉" %
+                ("已过期" if life < 0 else "恰好到期", life))
+        elif life <= 3:
+            log("[0] accessToken 快到期(剩余 %.1f 天) -> 强制重拉" % life)
+        else:
+            log("[0] accessToken 剩余 %.1f 天, 未到刷新窗口" % life)
+        stale = life <= 3
     except Exception as e:
         log("[0][!] token 寿命探测失败(%r), 退回 mtime 判定" % e)
         stale = False
-    if not stale:
+        life = None
+    if life is None:
+        # 探测失败才退回 mtime 判定
         try:
             stale = datetime.fromtimestamp(STORAGE.stat().st_mtime).date() != datetime.now().date()
         except OSError:
             stale = True
+        if stale:
+            log("[0] 退回判定: storage.json mtime 非当日, 视为过期需重拉")
     def kill_trae():
         r = subprocess.run(["taskkill", "/F", "/IM", "TRAE SOLO CN.exe", "/T"],
                            capture_output=True, timeout=60)
-        log("[0] 已杀掉旧 TRAE 进程(storage.json 停留在 %s), 强制重拉刷新会话" %
-            datetime.fromtimestamp(STORAGE.stat().st_mtime).strftime("%Y-%m-%d %H:%M"))
+        log("[0] 已杀掉旧 TRAE 进程(token 寿命已到刷新窗口), 强制重拉重鉴权")
         time.sleep(3)
     # 1) 拉起 Trae（若未运行 或 数据过期）
     def trae_running():
@@ -143,7 +155,7 @@ def main():
         _launch_and_tray()
         _launched_this_run = True
     else:
-        log("[1] Trae 已在运行且 storage.json 是今天的, 跳过拉起")
+        log("[1] Trae 已在运行且 token 未到刷新窗口, 跳过拉起")
     # 2) 等客户端刷新会话 —— 事件驱动: 轮询 storage.json mtime, 更新即走, 最多 15s
     def storage_fresh():
         try:
