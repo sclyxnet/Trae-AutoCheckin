@@ -97,13 +97,29 @@ def _launch_and_tray():
 
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    # 0) storage.json 新鲜度检查: 进程即使驻留托盘, 也可能几天没真正刷过会话。
-    #    mtime 不是今天 -> 杀掉进程强制重拉(重拉后会刷新)。
+    # 0) token 寿命检查（实测: token 未到期时 Trae 重启只是恢复缓存会话, 不会换新 token;
+    #    只有快到期时重启才会触发真正重鉴权）。因此:
+    #    - 剩余 >3 天: 进程在就直接同步, 不折腾 Trae
+    #    - 剩余 <=3 天: 强制杀掉重拉, 逼 Trae 走 refreshToken 换新链
     stale = False
     try:
-        stale = datetime.fromtimestamp(STORAGE.stat().st_mtime).date() != datetime.now().date()
-    except OSError:
-        stale = True
+        spec0 = importlib.util.spec_from_file_location("tg0", str(GET_TOKEN))
+        tg0 = importlib.util.module_from_spec(spec0); spec0.loader.exec_module(tg0)
+        ex0 = tg0.extract(str(STORAGE)) or {}
+        at = ex0.get("accessToken") or ""
+        p = at.split(".")[1]; p += "=" * (-len(p) % 4)
+        exp0 = int(json.loads(base64.urlsafe_b64decode(p)).get("exp", 0))
+        days = (exp0 - time.time()) / 86400
+        log("[0] 当前 accessToken 剩余 %.1f 天" % days)
+        stale = days <= 3
+    except Exception as e:
+        log("[0][!] token 寿命探测失败(%r), 退回 mtime 判定" % e)
+        stale = False
+    if not stale:
+        try:
+            stale = datetime.fromtimestamp(STORAGE.stat().st_mtime).date() != datetime.now().date()
+        except OSError:
+            stale = True
     def kill_trae():
         r = subprocess.run(["taskkill", "/F", "/IM", "TRAE SOLO CN.exe", "/T"],
                            capture_output=True, timeout=60)
@@ -140,8 +156,9 @@ def main():
         waited = 0
         while waited < 15:
             if storage_fresh():
+                time.sleep(2)              # 缓冲 2s 让文件写完
                 break
-            time.sleep(3); waited += 3
+            time.sleep(2); waited += 2
         log("[2] 等待 %ds 后 storage.json %s" % (waited, "已刷新(当日)" if storage_fresh()
                                                 else "未见更新(继续尝试同步, 失败由下轮调度兜底)"))
     # 3) 同实例导出（内存）
