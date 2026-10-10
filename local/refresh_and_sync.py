@@ -3,7 +3,8 @@
 Trae 令牌保活 + GitHub Secret 同步（Windows 计划任务入口）
 流程（有界，一次运行即退出）：
   1) 若 Trae SOLO CN 未运行则后台拉起（让客户端静默刷新 refreshToken 轮换链）
-  2) 等待 TRAE_WAIT_SECONDS 秒（默认 100s）给客户端完成会话刷新
+  2) 事件驱动等待: 轮询 storage.json mtime（会话刷新标志），已运行且新鲜则零等待，
+     否则最多 15s 内等到 mtime 变当日即继续
   3) 从 E:/devTools/AI/TraeCN/User/globalStorage/storage.json 同实例导出
      TRAE_ACCOUNTS + 4 个设备密钥（内存内，不落盘不回显）
   4) SealedBox 加密 PUT 更新 GitHub 5 个 Secret
@@ -24,7 +25,6 @@ LOCAL_ENV  = Path(r"E:/project/github/workbuddy-checkin/local.env")   # WB_GITHU
 REPO       = "sclyxnet/Trae-AutoCheckin"
 GET_TOKEN  = Path(r"E:/project/github/Trae-AutoCheckin/trae_get_token.py")
 LOG_DIR    = Path(r"Z:/tmp/trae-autocheckin/logs")
-WAIT_S     = int(os.environ.get("TRAE_WAIT_SECONDS", "100"))
 # 代理铁律: GitHub 走 socks5
 os.environ["HTTPS_PROXY"] = "socks5h://127.0.0.1:10808"
 os.environ["HTTP_PROXY"]  = "socks5h://127.0.0.1:10808"
@@ -122,13 +122,28 @@ def main():
     if running and stale:
         kill_trae()
         running = False
+    _launched_this_run = False
     if not running:
         _launch_and_tray()
+        _launched_this_run = True
     else:
         log("[1] Trae 已在运行且 storage.json 是今天的, 跳过拉起")
-    # 2) 等客户端刷新会话
-    log("[2] 等待 %ds 让 Trae 刷新会话..." % WAIT_S)
-    time.sleep(WAIT_S)
+    # 2) 等客户端刷新会话 —— 事件驱动: 轮询 storage.json mtime, 更新即走, 最多 15s
+    def storage_fresh():
+        try:
+            return datetime.fromtimestamp(STORAGE.stat().st_mtime).date() == datetime.now().date()
+        except OSError:
+            return False
+    if running and not stale and not _launched_this_run:
+        log("[2] Trae 已在运行且 storage.json 新鲜, 无需等待, 直接同步")
+    else:
+        waited = 0
+        while waited < 15:
+            if storage_fresh():
+                break
+            time.sleep(3); waited += 3
+        log("[2] 等待 %ds 后 storage.json %s" % (waited, "已刷新(当日)" if storage_fresh()
+                                                else "未见更新(继续尝试同步, 失败由下轮调度兜底)"))
     # 3) 同实例导出（内存）
     spec = importlib.util.spec_from_file_location("tg", str(GET_TOKEN))
     tg = importlib.util.module_from_spec(spec); spec.loader.exec_module(tg)
