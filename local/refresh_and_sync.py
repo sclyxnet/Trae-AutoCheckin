@@ -60,7 +60,11 @@ def _launch_and_tray():
     """explorer 代理后台拉起 Trae, 窗口出现后发 WM_CLOSE 缩系统托盘(前台无感知)。
     实测: Popen/Start-Process 直接 CreateProcess 会秒退, 必须 explorer 启动。"""
     try:
-        subprocess.Popen(["explorer.exe", TRAE_EXE])
+        # ★必须传反斜杠路径: explorer 只认 E:\...\x.exe 形式才真正执行(父进程=explorer, 同双击);
+        #   正斜杠 E:/... 会被当成"要打开的文件夹", 只弹资源管理器窗口不启动应用。
+        #   另: 新版 Trae(aha 引擎)校验父进程, 直接 CreateProcess/os.startfile 的进程会静默退出,
+        #   必须 explorer 代理(实测 2026-10-12: 反斜杠 explorer 5s 拉起+WM_CLOSE 缩托盘 PASS)。
+        subprocess.Popen(["explorer.exe", TRAE_EXE.replace("/", "\\")])
         log("[1] Trae 未运行, 已 explorer 代理后台拉起")
         import ctypes
         from ctypes import wintypes
