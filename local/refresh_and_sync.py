@@ -391,13 +391,11 @@ def main():
             time.sleep(2); waited += 2
         log("[2] 等待 %ds 后 storage.json %s" % (waited, "已刷新(当日)" if storage_fresh()
                                                 else "未见更新(继续尝试同步, 失败由下轮调度兜底)"))
-    # 2b) AI 探活(仅重拉 Trae 的班次): 向 deepseek-v4-flash 发一句「收到」探测,
-    #     对话明细随 dispatch inputs 带进推送; 非 重拉班 不探测不打扰
-    ai_probe_text = ""
-    if _launched_this_run:
-        okp, reply, detail = _ai_probe()
-        ai_probe_text = "发送: %s\n回复(%s): %s" % (CHAT_PROMPT, _probe_model_name(), reply)
-        log("[2b] AI 探活%s (%s)" % ("成功" if okp else "失败", detail))
+    # 2b) AI 探活(每次 dispatch 都做): 向 deepseek-v4-flash 发一句「收到」,
+    #     对话明细随 dispatch inputs 带进推送; 失败不影响签到主流程
+    okp, reply, detail = _ai_probe()
+    ai_probe_text = "发送: %s\n回复(%s): %s" % (CHAT_PROMPT, _probe_model_name(), reply)
+    log("[2b] AI 探活%s (%s)" % ("成功" if okp else "失败", detail))
     # 3) 同实例导出（内存）
     spec = importlib.util.spec_from_file_location("tg", str(GET_TOKEN))
     tg = importlib.util.module_from_spec(spec); spec.loader.exec_module(tg)

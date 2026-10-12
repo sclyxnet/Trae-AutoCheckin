@@ -1469,11 +1469,11 @@ def main():
     #   • PushPlus（1:1）：逐账号推送，每条带 积分/连续签到天数/重复签到提示 + token 寿命块（当前/到期/剩余）
     #   • 企业微信群机器人（群）：发一条汇总，避免刷屏
     if PLUSPLUS_TOKEN:
-        probe = (os.environ.get('TRAE_AI_PROBE') or '').strip()   # 重拉班的 AI 探活明细(本地 dispatch 传入)
+        probe = (os.environ.get('TRAE_AI_PROBE') or '').strip()   # AI 探活对话明细(本地 dispatch 传入)
         for r in results:
             title, body = _build_account_message(r)
             if probe:
-                body = body + '\n\n──── AI 探活(重拉班) ────\n' + probe
+                body = body + '\n\n──── AI 探活 ────\n' + probe
             notify_pushplus(title, body)
     notify('\n'.join(out), '🤖 Trae SOLO 多账号签到')
 
