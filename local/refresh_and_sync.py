@@ -205,6 +205,92 @@ def _fallback_pushplus(repo, headers, ctx, rid):
         log("[6b] ❌ 本机兜底推送失败: %r" % e)
 
 
+# ── AI 探活(重拉 Trae 的班次): 用 Trae 自己的 accessToken 调客户端内置模型
+#    (DeepSeek-V4-Flash, 与 Trae CN 客户端同款 llm_utils_chat 协议), 发一句
+#    「你好，请只回复两个字：收到」, 对话明细随 dispatch inputs 带进云端推送。
+#    ★凭据隔离铁律: 只用 Trae 自己的 storage.json 凭据, 绝不碰 WorkBuddy 体系。
+#    协议实测(2026-10-12, 全通): Authorization: Cloud-IDE-JWT <token> +
+#    x-app-id(product.json bootConfig.agent.appId) 等设备头 +
+#    body{app_id, app_version_code:22, user_id, function:"assistant", model,
+#    messages[content 为数组]} → SSE event:output 的 data.response 即回复。
+LLM_CHAT_URL = "https://trae-api-cn.mchost.guru/api/agent/v3/llm_utils_chat"
+AGENT_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"   # product.json bootConfig.agent.appId
+CHAT_PROMPT = "你好，请只回复两个字：收到"
+AI_PROBE_MODEL_DEFAULT = "deepseek-v4-flash"
+
+def _ai_probe():
+    """发送一句探活对话。返回 (ok, reply, detail)；失败时 reply 里带原因。"""
+    import uuid, platform as _pf
+    import urllib.request, urllib.error
+    try:
+        storage = json.loads(Path(STORAGE).read_text(encoding="utf-8"))
+    except Exception as e:
+        return False, "storage 读取失败", repr(e)
+    spec = importlib.util.spec_from_file_location("tgp", str(GET_TOKEN))
+    tgp = importlib.util.module_from_spec(spec); spec.loader.exec_module(tgp)
+    ex = tgp.extract(str(STORAGE)) or {}
+    at = ex.get("accessToken") or ""
+    uid = str(ex.get("uid") or "")
+    if not at:
+        return False, "token 缺失", "storage.json 无 accessToken"
+    dev = ""
+    for k in storage:
+        if k.startswith("iCubeAuthInfo://icube-dc:"):
+            d = k.split(":")[-1]
+            if d.isdigit():
+                dev = d; break
+    mid = str(storage.get("telemetry.machineId") or "")
+    H = {
+        "Authorization": "Cloud-IDE-JWT %s" % at,
+        "X-User-Region": "CN", "Content-Type": "application/json",
+        "x-app-id": AGENT_APP_ID, "x-app-version": "default",
+        "x-ide-version-code": "20260716", "x-app-version-code": "20260716",
+        "x-device-brand": "CV15S", "x-device-cpu": "Intel",
+        "x-device-id": dev, "x-machine-id": mid,
+        "x-os-version": "%s %s" % (_pf.system(), _pf.release()),
+        "x-device-type": "windows", "x-ide-version": "0.2.2",
+        "x-ide-version-type": "stable", "request-traffic-type": "prod",
+        "x-custom-trace-id": str(uuid.uuid4()), "User-Agent": "Trae/0.2.2",
+    }
+    body = {"app_id": AGENT_APP_ID, "app_version_code": 22, "user_id": uid,
+            "function": "assistant", "model": AI_PROBE_MODEL_DEFAULT,
+            "stream": False,
+            "messages": [{"role": "user",
+                          "content": [{"type": "text", "text": CHAT_PROMPT}]}]}
+    req = urllib.request.Request(LLM_CHAT_URL,
+                                 data=json.dumps(body).encode("utf-8"),
+                                 headers=H, method="POST")
+    try:
+        ctx = ssl.create_default_context()
+        raw = urllib.request.urlopen(req, timeout=60, context=ctx).read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        try:
+            b = e.read().decode("utf-8", "replace")[:120]
+        except Exception:
+            b = ""
+        return False, "HTTP %s" % e.code, "HTTP %s: %s" % (e.code, b)
+    except Exception as e:
+        return False, "请求异常", repr(e)
+    reply = ""
+    for ln in raw.splitlines():                      # SSE: event:output 行 data.response
+        ln = ln.strip()
+        if ln.startswith("data:") and '"response"' in ln:
+            try:
+                d = json.loads(ln[5:].strip())
+                reply = (d.get("response") or "").strip()
+            except Exception:
+                pass
+    if reply:
+        return True, reply, "成功"
+    m = re.search(r'"message":"([^"]{0,120})', raw)
+    return False, "空回复", m.group(1) if m else raw[:120]
+
+
+def _probe_model_name():
+    """探活实际使用的模型名(供推送明细标注)。"""
+    return AI_PROBE_MODEL_DEFAULT
+
+
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     # 0) token 寿命检查（实测: token 未到期时 Trae 重启只是恢复缓存会话, 不会换新 token;
@@ -305,6 +391,13 @@ def main():
             time.sleep(2); waited += 2
         log("[2] 等待 %ds 后 storage.json %s" % (waited, "已刷新(当日)" if storage_fresh()
                                                 else "未见更新(继续尝试同步, 失败由下轮调度兜底)"))
+    # 2b) AI 探活(仅重拉 Trae 的班次): 向 deepseek-v4-flash 发一句「收到」探测,
+    #     对话明细随 dispatch inputs 带进推送; 非 重拉班 不探测不打扰
+    ai_probe_text = ""
+    if _launched_this_run:
+        okp, reply, detail = _ai_probe()
+        ai_probe_text = "发送: %s\n回复(%s): %s" % (CHAT_PROMPT, _probe_model_name(), reply)
+        log("[2b] AI 探活%s (%s)" % ("成功" if okp else "失败", detail))
     # 3) 同实例导出（内存）
     spec = importlib.util.spec_from_file_location("tg", str(GET_TOKEN))
     tg = importlib.util.module_from_spec(spec); spec.loader.exec_module(tg)
@@ -372,7 +465,7 @@ def main():
     put("TRAE_DEVICE_PUB_PEM", pub.replace("\n", "\\n"))
     log("[5] 5 个 Secret 已同步, dispatch 触发一次签到...")
     api("/repos/%s/actions/workflows/trae-auto-checkin.yml/dispatches" % REPO,
-        {"ref": "main"}, "POST")
+        {"ref": "main", "inputs": {"ai_probe": ai_probe_text}}, "POST")
     rid = None
     for _ in range(20):          # 有界: 最多 ~100s 找到本次 run
         runs = api("/repos/%s/actions/runs?per_page=3" % REPO)["workflow_runs"]

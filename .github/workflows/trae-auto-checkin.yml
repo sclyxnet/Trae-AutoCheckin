@@ -36,7 +36,12 @@ on:
     # UTC: 00:23+8 -> 16:23(前日UTC)；10:23+8 -> 02:23(当日UTC)
     - cron: '23 16 * * *'
     - cron: '23 2 * * *'
-  workflow_dispatch: {}   # 允许在 Actions 页面手动触发
+  workflow_dispatch:
+    inputs:
+      ai_probe:
+        description: 'AI 探活对话明细(重拉 Trae 的班次由本地任务填入)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -68,6 +73,7 @@ jobs:
           QYWX_TOKEN: ${{ secrets.QYWX_TOKEN }}
           PLUSPLUS_TOKEN: ${{ secrets.PLUSPLUS_TOKEN }}
           TRAE_SOURCE: ${{ github.event_name }}   # cron=定时班 / workflow_dispatch=本地触发
+          TRAE_AI_PROBE: ${{ github.event.inputs.ai_probe || '' }}   # 重拉班的 AI 探活对话明细
           TRAE_PEAK_HOURS: '0'
           TRAE_COOLDOWN_MIN: '55'
           TRAE_PEAK_COOLDOWN_MIN: '12'
