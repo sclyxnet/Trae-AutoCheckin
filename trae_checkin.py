@@ -1126,18 +1126,26 @@ def notify(text, title=''):
         return False
 
 
-def notify_pushplus(title, content):
+def notify_pushplus(title, content, retries=3):
     if not PLUSPLUS_TOKEN:
         return
-    try:
-        req = urllib.request.Request(PUSHPLUS_URL,
-                                    data=json.dumps({'token': PLUSPLUS_TOKEN, 'title': title,
-                                                     'content': content, 'template': 'txt'}).encode('utf-8'),
-                                    headers={'Content-Type': 'application/json'}, method='POST')
-        urllib.request.urlopen(req, timeout=10)
-        print('✅ [PushPlus] 推送成功')
-    except Exception as e:
-        print('❌ [PushPlus] 推送失败: %s' % e)
+    last = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(PUSHPLUS_URL,
+                                        data=json.dumps({'token': PLUSPLUS_TOKEN, 'title': title,
+                                                         'content': content, 'template': 'txt'}).encode('utf-8'),
+                                        headers={'Content-Type': 'application/json'}, method='POST')
+            urllib.request.urlopen(req, timeout=15)
+            print('✅ [PushPlus] 推送成功' if attempt == 1
+                  else '✅ [PushPlus] 第%d次重试推送成功' % attempt)
+            return
+        except Exception as e:
+            last = e
+            print('⚠️ [PushPlus] 第%d/%d次推送失败: %s' % (attempt, retries, e))
+            if attempt < retries:
+                time.sleep(2 * attempt)   # 退避 2s/4s, 应对 GitHub 国外 runner 偶发 SSL 握手超时
+    print('❌ [PushPlus] 推送失败(已重试%d次): %s' % (retries, last))
 
 
 def push(title, text):

@@ -95,6 +95,112 @@ def _launch_and_tray():
     except Exception as e:
         log("[1][X] 拉起 Trae 失败: %r（继续用现有存储令牌尝试同步）" % e)
 
+# ── 本机兜底推送: GitHub 美国 runner 连 pushplus.plus 常 SSL 握手超时,
+#    本机在国内直连稳, 在 GitHub 推送失败时把签到报告重推一次 ──────────
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
+LOCAL_PUSHPLUS_ENV = Path(r"E:/project/github/Trae-AutoCheckin/local/.pushplus.env")
+
+def _load_local_pushplus_token():
+    if LOCAL_PUSHPLUS_ENV.exists():
+        for line in LOCAL_PUSHPLUS_ENV.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("PLUSPLUS_TOKEN="):
+                return s.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+def _fallback_pushplus(repo, headers, ctx, rid):
+    """GitHub 侧 PushPlus 失败时用本机(国内)网络把签到报告重推一次, 避免收不到。"""
+    if not rid:
+        return
+    tok = _load_local_pushplus_token()
+    if not tok:
+        log("[6b] 本机兜底未启用: local/.pushplus.env 缺 PLUSPLUS_TOKEN（GitHub 侧重试兜底仍生效）")
+        return
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/%s/actions/runs/%s/logs" % (repo, rid),
+            headers=headers, method="GET")
+        raw = urllib.request.urlopen(req, context=ctx, timeout=60).read()
+        import io as _io
+        z = zipfile.ZipFile(_io.BytesIO(raw))
+        step4 = [n for n in z.namelist() if "4_执行" in n]
+        if not step4:
+            log("[6b] 未找到 step4 日志, 无法兜底"); return
+        t = z.read(step4[0]).decode("utf-8", "replace")
+        if "✅ [PushPlus] 推送成功" in t:
+            log("[6b] GitHub 侧推送已成功, 跳过本机兜底(不重复)"); return
+        if "❌ [PushPlus]" not in t:
+            log("[6b] 无 GitHub 推送失败标记, 跳过"); return
+        # 剥离 GitHub 时间戳前缀, 取 ╔ 表格块到 PushPlus 行之前 = 完整签到报告
+        lines = [re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*", "", ln) for ln in t.splitlines()]
+        text = "\n".join(lines)
+        m = re.search(r"(╔═+.*?)(❌\s*\[PushPlus\].*)$", text, re.S)
+        body = (m.group(1).strip() if m else text.strip())
+        if not body:
+            log("[6b] 提取到的报告为空, 跳过"); return
+        data = json.dumps({"token": tok, "title": "🤖 Trae SOLO 签到·本机兜底",
+                           "content": body, "template": "txt"}).encode("utf-8")
+        preq = urllib.request.Request(PUSHPLUS_URL, data=data,
+                                      headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(preq, timeout=10)
+        log("[6b] ✅ 本机兜底推送成功（GitHub 超时, 本地用国内网络补推）")
+    except Exception as e:
+        log("[6b] ❌ 本机兜底推送失败: %r" % e)
+
+
+# ── 本机兜底推送: GitHub 美国 runner 连 pushplus.plus 常 SSL 握手超时,
+#    本机在国内直连稳, 在 GitHub 推送失败时把签到报告重推一次 ──────────
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
+LOCAL_PUSHPLUS_ENV = Path(r"E:/project/github/Trae-AutoCheckin/local/.pushplus.env")
+
+def _load_local_pushplus_token():
+    if LOCAL_PUSHPLUS_ENV.exists():
+        for line in LOCAL_PUSHPLUS_ENV.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s.startswith("PLUSPLUS_TOKEN="):
+                return s.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+def _fallback_pushplus(repo, headers, ctx, rid):
+    """GitHub 侧 PushPlus 失败时用本机(国内)网络把签到报告重推一次, 避免收不到。"""
+    if not rid:
+        return
+    tok = _load_local_pushplus_token()
+    if not tok:
+        log("[6b] 本机兜底未启用: local/.pushplus.env 缺 PLUSPLUS_TOKEN（GitHub 侧重试兜底仍生效）")
+        return
+    try:
+        req = urllib.request.Request(
+            "https://api.github.com/repos/%s/actions/runs/%s/logs" % (repo, rid),
+            headers=headers, method="GET")
+        raw = urllib.request.urlopen(req, context=ctx, timeout=60).read()
+        import io as _io
+        z = zipfile.ZipFile(_io.BytesIO(raw))
+        step4 = [n for n in z.namelist() if "4_执行" in n]
+        if not step4:
+            log("[6b] 未找到 step4 日志, 无法兜底"); return
+        t = z.read(step4[0]).decode("utf-8", "replace")
+        if "✅ [PushPlus] 推送成功" in t:
+            log("[6b] GitHub 侧推送已成功, 跳过本机兜底(不重复)"); return
+        if "❌ [PushPlus]" not in t:
+            log("[6b] 无 GitHub 推送失败标记, 跳过"); return
+        # 剥离 GitHub 时间戳前缀, 取 ╔ 表格块到 PushPlus 行之前 = 完整签到报告
+        lines = [re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*", "", ln) for ln in t.splitlines()]
+        text = "\n".join(lines)
+        m = re.search(r"(╔═+.*?)(❌\s*\[PushPlus\].*)$", text, re.S)
+        body = (m.group(1).strip() if m else text.strip())
+        if not body:
+            log("[6b] 提取到的报告为空, 跳过"); return
+        data = json.dumps({"token": tok, "title": "🤖 Trae SOLO 签到·本机兜底",
+                           "content": body, "template": "txt"}).encode("utf-8")
+        preq = urllib.request.Request(PUSHPLUS_URL, data=data,
+                                      headers={"Content-Type": "application/json"}, method="POST")
+        urllib.request.urlopen(preq, timeout=10)
+        log("[6b] ✅ 本机兜底推送成功（GitHub 超时, 本地用国内网络补推）")
+    except Exception as e:
+        log("[6b] ❌ 本机兜底推送失败: %r" % e)
+
+
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     # 0) token 寿命检查（实测: token 未到期时 Trae 重启只是恢复缓存会话, 不会换新 token;
@@ -282,6 +388,7 @@ def main():
                 concl = r["conclusion"]; break
             time.sleep(10)
         log("[6] 签到 run 结论: %s" % (concl or "timeout(仍在运行, 推送结果以 PushPlus 为准)"))
+        _fallback_pushplus(REPO, H, CTX, rid)
     log("[7] 全部完成：Secret 已同步 + 已触发签到，结果看 PushPlus 推送")
 
 if __name__ == "__main__":
