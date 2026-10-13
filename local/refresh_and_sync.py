@@ -307,6 +307,38 @@ def _probe_model_name():
     return AI_PROBE_MODEL_DEFAULT
 
 
+def trae_in_use():
+    """检测 Trae 是否有可见窗口(用户正在用)。有窗=True; 检测异常时保守返回 True(不杀)。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
+                             capture_output=True, timeout=30).stdout.decode("gbk", "replace")
+        ps = {int(l.split('","')[1]) for l in out.splitlines()
+              if len(l.split('","')) >= 2 and l.split('","')[0].strip('"').lower() == "trae cn.exe"}
+        if not ps:
+            return False
+        found = []
+        def _cb(hwnd, _):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in ps and user32.IsWindowVisible(hwnd):
+                t = ctypes.create_unicode_buffer(256)
+                user32.GetWindowTextW(hwnd, t, 256)
+                if t.value:
+                    found.append(t.value)
+            return True
+        user32.EnumWindows(WNDENUMPROC(_cb), 0)
+        if found:
+            log("[0] 检测到 Trae 可见窗口(正在使用): %s" % "/".join(found[:3]))
+            return True
+        return False
+    except Exception as e:
+        log("[0][!] 使用状态检测失败(%r), 按正在使用处理(不杀)" % e)
+        return True
+
 def main():
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     # 0) token 寿命检查（实测: token 未到期时 Trae 重启只是恢复缓存会话, 不会换新 token;
@@ -381,13 +413,26 @@ def main():
         except Exception:
             return False
     running = trae_running()
+    deferred = False
     if running and stale:
-        kill_trae()
-        running = False
+        if life is not None and life <= 0:
+            # token 已死: 不拉必失败, 会话丢了更麻烦, 即使用户在用也必须拉
+            log("[0] token 已过期, 即使用户正在使用中也必须重拉(否则会话将失效)")
+            kill_trae()
+            running = False
+        elif trae_in_use():
+            # 快到期但用户正在用: 本轮不杀不拉, 顺延至下个班次(3h 后)再试
+            log("[0] token 快到期(剩 %.1f 天)但 Trae 正在使用中 -> 本轮不杀不拉, 刷新顺延至下个班次" % life)
+            deferred = True
+        else:
+            kill_trae()
+            running = False
     _launched_this_run = False
     if not running:
         _launch_and_tray()
         _launched_this_run = True
+    elif deferred:
+        log("[1] Trae 在运行且你在用, 跳过重拉(刷新顺延), 继续用现有 token 同步")
     else:
         log("[1] Trae 已在运行且 token 未到刷新窗口, 跳过拉起")
     # 2) 等客户端刷新会话 —— 事件驱动: 轮询 storage.json mtime, 更新即走, 最多 15s
@@ -398,6 +443,8 @@ def main():
             return False
     if running and not stale and not _launched_this_run:
         log("[2] Trae 已在运行且 storage.json 新鲜, 无需等待, 直接同步")
+    elif deferred:
+        log("[2] 本轮未重拉(你在用), 直接同步现有 token; 下个班次再尝试刷新")
     else:
         waited = 0
         while waited < 15:
