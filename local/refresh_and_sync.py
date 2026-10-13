@@ -19,8 +19,8 @@ from io import StringIO
 import urllib.request
 
 # ── 配置 ──────────────────────────────────────────────
-TRAE_EXE   = r"E:\devTools\trae\solo\TRAE SOLO CN.exe"
-STORAGE    = Path(r"E:/devTools/AI/TraeCN/User/globalStorage/storage.json")
+TRAE_EXE   = r"E:\devTools\trae\Trae CN.exe"   # 新版合并客户端(2026-10-13 升级, 旧 TRAE SOLO CN 已停服卸载)
+STORAGE    = Path(r"C:/Users/lujin/AppData/Roaming/Trae CN/User/globalStorage/storage.json")
 LOCAL_ENV  = Path(r"E:/project/github/workbuddy-checkin/local.env")   # WB_GITHUB_TOKEN
 REPO       = "sclyxnet/Trae-AutoCheckin"
 GET_TOKEN  = Path(r"E:/project/github/Trae-AutoCheckin/trae_get_token.py")
@@ -57,7 +57,7 @@ def log(msg):
     print(line)
 
 def _launch_and_tray():
-    """explorer 代理后台拉起 Trae, 窗口出现后发 WM_CLOSE 缩系统托盘(前台无感知)。
+    """explorer 代理后台拉起 Trae, 关闭所有可见窗口缩系统托盘(前台无感知)。
     实测: Popen/Start-Process 直接 CreateProcess 会秒退, 必须 explorer 启动。"""
     try:
         # ★必须传反斜杠路径: explorer 只认 E:\...\x.exe 形式才真正执行(父进程=explorer, 同双击);
@@ -77,25 +77,41 @@ def _launch_and_tray():
             out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"],
                                  capture_output=True, timeout=30).stdout.decode("gbk", "replace")
             target = {int(l.split('","')[1]) for l in out.splitlines()
-                      if len(l.split('","')) >= 2 and l.split('","')[0].strip('"').lower() == "trae solo cn.exe"}
+                      if len(l.split('","')) >= 2 and l.split('","')[0].strip('"').lower() == "trae cn.exe"}
             if not target:
                 continue
+            # ★新版(合并客户端)会开多个窗口(Trae CN 主窗 + Agent 窗), 必须全部关掉;
+            #   只关第一个就退出会留下 Agent 窗在前台(实测 2026-10-13)。
             def _cb(hwnd, _):
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
                 if pid.value in target and user32.IsWindowVisible(hwnd):
                     t = ctypes.create_unicode_buffer(256)
                     user32.GetWindowTextW(hwnd, t, 256)
-                    if t.value:                    # 有标题的可见主窗口
+                    if t.value:                    # 有标题的可见窗口
                         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
                         closed.append(t.value)
-                        return False
-                return True
+                return True                         # 继续枚举, 关掉所有
             user32.EnumWindows(WNDENUMPROC(_cb), 0)
             if closed:
-                break
-        log("[1] 主窗口%s" % ("已发 WM_CLOSE -> 缩系统托盘(标题:%s)" % closed[0] if closed
-                              else "未出现/已在托盘, 前台无感知"))
+                time.sleep(2)                       # 等窗口响应关闭
+                # 复查: 无可见窗口才算全部缩托盘; 若又弹新窗则下一轮继续关
+                still = []
+                def _cb2(hwnd, _):
+                    pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    if pid.value in target and user32.IsWindowVisible(hwnd):
+                        t = ctypes.create_unicode_buffer(256)
+                        user32.GetWindowTextW(hwnd, t, 256)
+                        if t.value:
+                            still.append(t.value)
+                    return True
+                user32.EnumWindows(WNDENUMPROC(_cb2), 0)
+                if not still:
+                    break
+                log("[1] 仍有可见窗口 %s, 继续关闭" % still)
+        log("[1] 窗口%s" % ("已全部发 WM_CLOSE -> 缩系统托盘(标题:%s)" % "/".join(closed) if closed
+                            else "未出现/已在托盘, 前台无感知"))
     except Exception as e:
         log("[1][X] 拉起 Trae 失败: %r（继续用现有存储令牌尝试同步）" % e)
 
@@ -352,16 +368,16 @@ def main():
         if stale:
             log("[0] 退回判定: storage.json mtime 非当日, 视为过期需重拉")
     def kill_trae():
-        r = subprocess.run(["taskkill", "/F", "/IM", "TRAE SOLO CN.exe", "/T"],
+        r = subprocess.run(["taskkill", "/F", "/IM", "Trae CN.exe", "/T"],
                            capture_output=True, timeout=60)
         log("[0] 已杀掉旧 TRAE 进程(token 寿命已到刷新窗口), 强制重拉重鉴权")
         time.sleep(3)
     # 1) 拉起 Trae（若未运行 或 数据过期）
     def trae_running():
         try:
-            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq TRAE SOLO CN.exe"],
+            out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Trae CN.exe"],
                                  capture_output=True, timeout=30).stdout.decode("gbk", "replace").lower()
-            return "trae solo cn.exe" in out
+            return "trae cn.exe" in out
         except Exception:
             return False
     running = trae_running()
@@ -407,7 +423,9 @@ def main():
     for k in s:
         if k.startswith("iCubeAuthInfo://icube-dc:"):
             d = k.split(":")[-1]
-            if d.isdigit(): did = d; break
+            # 新版(合并客户端): icube-dc:aha-<hash>; 旧版: icube-dc:<纯数字>
+            if d.isdigit() or d.startswith("aha-"):
+                did = d; break
     assert did, "storage.json 中无 iCubeAuthInfo://icube-dc:<did> 设备密钥"
     dev_enc = s.get("iCubeAuthInfo://icube-dc:%s" % did)
     dev = json.loads(tg.decrypt_storage_value(dev_enc.strip()).decode("utf-8", "replace"))

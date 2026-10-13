@@ -192,12 +192,13 @@ def decrypt_storage_value(base64_value):
 
 
 def dc_device_id(storage):
-    """取客户端真实设备号：storage.json 里 iCubeAuthInfo://icube-dc:<numeric> 键。
-    真机设备号比脚本生成的号更像正常客户端，拿不到时才回退生成号。"""
+    """取客户端真实设备号：storage.json 里 iCubeAuthInfo://icube-dc:<id> 键。
+    真机设备号比脚本生成的号更像正常客户端，拿不到时才回退生成号。
+    两种格式：旧版 icube-dc:<纯数字>；新版(合并客户端 Trae CN) icube-dc:aha-<hash>。"""
     for k in storage:
         if k.startswith('iCubeAuthInfo://icube-dc:'):
             d = k.split(':')[-1]
-            if d.isdigit():
+            if d.isdigit() or d.startswith('aha-'):
                 return d
     return ''
 
