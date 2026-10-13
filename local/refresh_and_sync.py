@@ -12,7 +12,7 @@ Trae 令牌保活 + GitHub Secret 同步（Windows 计划任务入口）
 之后 GitHub Actions 于北京时间 00:23 / 08:23 两班跑签到。
 """
 import base64, json, os, ssl, subprocess, sys, time, importlib.util
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from io import StringIO
 
@@ -307,6 +307,108 @@ def _probe_model_name():
     return AI_PROBE_MODEL_DEFAULT
 
 
+# ── 节假日长假检测(缓存优先, 缺年份/缓存超30天才拉 API; 双源: 逐日调休安排 > 法定锚点) ──
+HOLIDAYS_CACHE   = Path(r"E:/project/github/Trae-AutoCheckin/local/holidays_cache.json")
+HOLIDAY_API_DAYMAP = "https://api.jiejiariapi.com/v1/holidays/{year}"       # 全年调休安排(33休+8补班)
+HOLIDAY_API_ANCHOR = "https://date.nager.at/api/v3/publicholidays/{year}/CN"  # 法定锚点(备源)
+
+def _fetch_holidays(y):
+    """拉当年假日安排 -> (off_dates:set, names:dict, source)；双源都失败返回空。"""
+    UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    # 主源: 逐日安排(含调休补班, 真实长假段)
+    try:
+        req = urllib.request.Request(HOLIDAY_API_DAYMAP.format(year=y), headers=UA)
+        d = json.loads(urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context())
+                       .read().decode("utf-8", "replace"))
+        if isinstance(d, dict) and len(d) >= 10:
+            off = {k for k, v in d.items() if isinstance(v, dict) and v.get("isOffDay")}
+            names = {k: (v.get("name") or "") for k, v in d.items() if isinstance(v, dict)}
+            if off:
+                return off, names, "daymap"
+    except Exception as e:
+        log("[假期] 主源(逐日调休)失败: %r" % e)
+    # 备源: 法定锚点(春节/国庆±3天, 劳动节±2天, 其它±1天展开)
+    try:
+        req = urllib.request.Request(HOLIDAY_API_ANCHOR.format(year=y), headers=UA)
+        arr = json.loads(urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context())
+                         .read().decode("utf-8", "replace"))
+        off, names = set(), {}
+        for it in arr:
+            ds = it.get("date")
+            if not ds:
+                continue
+            nm = it.get("localName") or it.get("name") or ""
+            d0 = datetime.strptime(ds, "%Y-%m-%d")
+            pad = 3 if ("春" in nm or "Spring" in nm or "National" in nm or "国庆" in nm) else \
+                  2 if ("劳动" in nm or "Labour" in nm) else 1
+            for i in range(-pad, pad + 1):
+                k = (d0 + timedelta(days=i)).strftime("%Y-%m-%d")
+                off.add(k); names[k] = nm
+        if off:
+            return off, names, "anchor"
+    except Exception as e:
+        log("[假期] 备源(法定锚点)失败: %r" % e)
+    return set(), {}, ""
+
+def _holiday_year_data():
+    """当年 (off_dates, names, source)。缓存优先; 缺年份或缓存 >=30 天才拉 API(跨年新发布自动补拉)。"""
+    y = str(datetime.now().year)
+    try:
+        cache = json.loads(HOLIDAYS_CACHE.read_text(encoding="utf-8")) if HOLIDAYS_CACHE.exists() else {}
+    except Exception:
+        cache = {}
+    years = cache.get("years") or {}
+    rec = years.get(y) or {}
+    try:
+        stale = (datetime.now() - datetime.fromisoformat(rec.get("fetched", "2000-01-01T00:00:00"))).days >= 30
+    except Exception:
+        stale = True
+    if not rec.get("off") or stale:
+        off, names, src = _fetch_holidays(y)
+        if off:
+            years[y] = {"fetched": datetime.now().isoformat(), "source": src,
+                        "off": sorted(off), "names": names}
+            cache["years"] = years
+            try:
+                HOLIDAYS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                HOLIDAYS_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                log("[假期] 缓存写入失败(%r), 不影响本次" % e)
+            log("[假期] %s 年假日安排已获取(源=%s, %d 个休息日)%s" % (
+                y, src, len(off), "(缓存已更新)" if rec.get("off") else ""))
+            return off, names, src
+        log("[假期] %s 年假日安排获取失败, 回退缓存(本年不武装也不报错)" % y)
+    return set(rec.get("off") or []), (rec.get("names") or {}), (rec.get("source") or "cache")
+
+def _long_holiday_windows(off, names):
+    """休息日按日历连续性聚类(间隔<=1天), >=5 天的段为长假窗口 -> [(start, end, name)]"""
+    if not off:
+        return []
+    ds = sorted(datetime.strptime(k, "%Y-%m-%d") for k in off)
+    spans, cur = [], [ds[0], ds[0]]
+    for d0 in ds[1:]:
+        if (d0 - cur[1]).days <= 1:
+            cur[1] = d0
+        else:
+            spans.append(cur); cur = [d0, d0]
+    spans.append(cur)
+    out = []
+    for a, b in spans:
+        if (b - a).days + 1 >= 5:
+            nm = names.get(a.strftime("%Y-%m-%d")) or names.get((a + timedelta(days=1)).strftime("%Y-%m-%d")) or "长假"
+            out.append((a, b, nm))
+    return out
+
+def _holiday_arming():
+    """未来 48h 内是否有 >=5 天长假开始 -> (start, end, name, hours_left) 或 None。"""
+    off, names, _ = _holiday_year_data()
+    now = datetime.now()
+    for a, b, nm in _long_holiday_windows(off, names):
+        delta = (a - now).total_seconds()
+        if 0 <= delta <= 48 * 3600:
+            return a, b, nm, delta / 3600
+    return None
+
 def trae_in_use():
     """检测 Trae 是否有可见窗口(用户正在用)。有窗=True; 检测异常时保守返回 True(不杀)。"""
     try:
@@ -459,6 +561,19 @@ def main():
     okp, reply, detail = _ai_probe()
     ai_probe_text = "发送: %s\n回复(%s): %s" % (CHAT_PROMPT, _probe_model_name(), reply)
     log("[2b] AI 探活%s (%s)" % ("成功" if okp else "失败", detail))
+    # 2c) 假期武装: 未来 48h 内有 >=5 天长假 -> 让云端立刻轮换 token(新鲜 14 天),
+    #     假期中只消耗 accessToken 不碰 refreshToken, 杜绝"剩余寿命不够+长假断签"
+    force_refresh = "0"
+    arm = _holiday_arming()
+    if arm:
+        a, b, nm, hrs = arm
+        log("[2c] ⚠️ 假期武装触发: %.1f 小时后进入【%s】长假 %s~%s(%d 天)" % (
+            hrs, nm, a.strftime("%m-%d"), b.strftime("%m-%d"), (b - a).days + 1))
+        log("[2c]   本次 dispatch 带 force_refresh=1: 云端将立刻 ExchangeToken 轮换(新鲜 14 天覆盖假期);")
+        log("[2c]   代价: 轮换后本机客户端那份 token 失效, 假期后首次刷新可能需重新登录 Trae 一次")
+        force_refresh = "1"
+    else:
+        log("[2c] 假期检测: 未来 48h 无 >=5 天长假, 不武装")
     # 3) 同实例导出（内存）
     spec = importlib.util.spec_from_file_location("tg", str(GET_TOKEN))
     tg = importlib.util.module_from_spec(spec); spec.loader.exec_module(tg)
@@ -528,7 +643,8 @@ def main():
     put("TRAE_DEVICE_PUB_PEM", pub.replace("\n", "\\n"))
     log("[5] 5 个 Secret 已同步, dispatch 触发一次签到...")
     api("/repos/%s/actions/workflows/trae-auto-checkin.yml/dispatches" % REPO,
-        {"ref": "main", "inputs": {"ai_probe": ai_probe_text}}, "POST")
+        {"ref": "main", "inputs": {"ai_probe": ai_probe_text,
+                                   "force_refresh": force_refresh}}, "POST")
     rid = None
     for _ in range(20):          # 有界: 最多 ~100s 找到本次 run
         runs = api("/repos/%s/actions/runs?per_page=3" % REPO)["workflow_runs"]

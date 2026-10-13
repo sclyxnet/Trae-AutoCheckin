@@ -39,9 +39,13 @@ on:
   workflow_dispatch:
     inputs:
       ai_probe:
-        description: 'AI 探活对话明细(重拉 Trae 的班次由本地任务填入)'
+        description: 'AI 探活对话明细(本地保活任务每次 dispatch 自动带入)'
         required: false
         default: ''
+      force_refresh:
+        description: '假期武装: =1 强制轮换 token 再签到; =plan 只演练不调用'
+        required: false
+        default: '0'
 
 permissions:
   contents: read
@@ -73,7 +77,8 @@ jobs:
           QYWX_TOKEN: ${{ secrets.QYWX_TOKEN }}
           PLUSPLUS_TOKEN: ${{ secrets.PLUSPLUS_TOKEN }}
           TRAE_SOURCE: ${{ github.event_name }}   # cron=定时班 / workflow_dispatch=本地触发
-          TRAE_AI_PROBE: ${{ github.event.inputs.ai_probe || '' }}   # 重拉班的 AI 探活对话明细
+          TRAE_AI_PROBE: ${{ github.event.inputs.ai_probe || '' }}   # AI 探活对话明细
+          TRAE_FORCE_REFRESH: ${{ github.event.inputs.force_refresh || '0' }}   # 假期武装: 强制轮换 token
           TRAE_PEAK_HOURS: '0'
           TRAE_COOLDOWN_MIN: '55'
           TRAE_PEAK_COOLDOWN_MIN: '12'

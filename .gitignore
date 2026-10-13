@@ -36,3 +36,4 @@ trae-*.json
 trae_accounts.out
 trae_keys.out
 
+local/holidays_cache.json

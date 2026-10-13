@@ -113,6 +113,11 @@ RATE_HTTP_CODES = (429, 500, 502, 503, 504)
 RATE_CODE = 9074                            # 参与用户太多（排队限流，可重试）
 REQ_SOURCE = 1                              # 客户端签到请求体固定带 {"req_source":1}
 REQ_BODY = '{"req_source": %d}' % REQ_SOURCE
+# 假期武装: force_refresh=1 -> 先强制 ExchangeToken 轮换 token 再签到(长假前让云端
+# 持新鲜 14 天 accessToken, 假期中完全不碰 refreshToken); =plan/dry -> 只打日志不调用
+_FR = os.environ.get('TRAE_FORCE_REFRESH', '').strip().lower()
+FORCE_REFRESH = _FR in ('1', 'true', 'yes', 'on')
+FORCE_REFRESH_PLAN = _FR in ('plan', 'dry', 'dryrun')
 ALREADY_CODE = 9095                         # 今日已签
 QYWX_URL = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key='
 PUSHPLUS_URL = 'https://www.pushplus.plus/send'
@@ -1172,6 +1177,15 @@ def checkin_account(acc, cache):
 
     acc['deviceId'] = device_id_for(acc, acc.get('deviceId', ''))
     print('📱 [设备号] %s: %s' % (name, acc['deviceId']))
+    # 假期武装: 强制轮换 token(先于状态查询, 轮换后即用新 token 签到)
+    if (FORCE_REFRESH or FORCE_REFRESH_PLAN) and acc.get('refreshToken'):
+        if FORCE_REFRESH_PLAN:
+            print('🔁 [武装][PLAN] force_refresh=plan: 将强制轮换 token(dry-run, 不实际调用)')
+        else:
+            print('🔁 [武装] force_refresh=1: 强制轮换 token(假期前武装) ...')
+            ok, msg = ensure_token(acc, cache)
+            print(('✅ [武装] 已轮换: %s' % msg) if ok
+                  else ('⚠️ [武装] 轮换失败(继续用现有 token): %s' % msg))
     log_head('📡 %s 签到状态查询' % name)
 
     checked_in, credits, enable, code, raw = status_of(acc['accessToken'], acc['deviceId'])
