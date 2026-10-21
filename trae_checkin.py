@@ -1211,6 +1211,8 @@ def checkin_account(acc, cache):
         result['status'] = '已签到'
         result['credits'] = pts if pts is not None else credits
         result['detail'] = '今天已签到，请明天再来（重复签到）'
+        if result['credits'] not in (None, '-', ''):
+            result['detail'] += '，当前余额 %s' % _fmt(result['credits'])
         print('☑️  [结果] 今日已签到（重复签到）')
         return result
     # 状态查询拿到鉴权失败（刷新后仍 1001）→ 硬失败，绝不浪费 claim 请求
@@ -1358,7 +1360,14 @@ def _build_account_message(r):
     exp_block = '当前: %s (北京时间)\n到期: %s (北京时间)\n剩余: %s' % (now_bj, exp_str, left)
 
     if status == '已签到':
-        msg = '今天已签到，请明天再来（重复签到）'
+        # 已签到也带余额：AI 探活每次 dispatch 都会跑一遍，一天里大部分推送
+        # 都落在"已签到"分支，不查余额的话用户整天看到的都是无积分消息
+        parts = ['今天已签到，请明天再来（重复签到）']
+        if r.get('credits') not in (None, '-', ''):
+            parts.append('当前余额 %s' % _fmt(r['credits']))
+        if r.get('streak') is not None:
+            parts.append('连续签到 %d 天' % r['streak'])
+        msg = '，'.join(parts)
     elif status == '签到成功':
         parts = []
         if r.get('gained') is not None:
